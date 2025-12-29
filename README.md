@@ -21,17 +21,15 @@ npm run build
 Then run the converter:
 
 ```bash
-node dist/main.js --products data\products.json --machines data\machines_and_buildings.json --icons data\icons --transports data\transports.json --output output
+node dist/main.js --data data --output output
 ```
 
 ### Command-line Arguments
 
 **Required:**
-- `--products`, `-p`: Path to products.json from captain-of-data mod
-- `--machines`, `-m`: Path to machines_and_buildings.json from captain-of-data mod
+- `--data`, `-d`: Path to directory containing captain-of-data JSON files (products.json, machines_and_buildings.json, transports.json)
 
 **Optional:**
-- `--transports`, `-t`: Path to transports.json from captain-of-data mod
 - `--icons`, `-i`: Path to folder containing icon images
 - `--output`, `-o`: Output folder for data.json and icons.webp (default: `./factoriolab_output`)
 - `--icon-size`: Icon size in pixels (default: 64)

@@ -3,7 +3,7 @@
  * Convert Captain of Industry data from captain-of-data mod to FactorioLab format.
  *
  * Usage:
- *     node dist/main.js --products products.json --machines machines_and_buildings.json --icons icons_folder --output output_folder
+ *     node dist/main.js --data data_directory --output output_folder
  *
  * This script converts the JSON files exported by the captain-of-data mod into the
  * data.json and icons.webp files required by FactorioLab.
@@ -210,16 +210,15 @@ class COIToFactorioLabConverter {
     // Track what we've seen
     private seenItems: Set<string> = new Set();
     private seenRecipes: Set<string> = new Set();
-    private recipeNames: Map<string, string> = new Map();
     private categorySet: Set<string> = new Set();
 
     // Icon tracking
     private iconIdToFile: Map<string, string> = new Map();
 
-    constructor(productsFile: string, machinesFile: string, transportsFile: string | null = null, iconsFolder: string | null = null) {
-        this.productsFile = productsFile;
-        this.machinesFile = machinesFile;
-        this.transportsFile = transportsFile;
+    constructor(dataDir: string, iconsFolder: string | null = null) {
+        this.productsFile = path.join(dataDir, 'products.json');
+        this.machinesFile = path.join(dataDir, 'machines_and_buildings.json');
+        this.transportsFile = path.join(dataDir, 'transports.json');
         this.iconsFolder = iconsFolder;
     }
 
@@ -464,67 +463,10 @@ class COIToFactorioLabConverter {
 
         this.categorySet.add(recipeCategory);
 
-        // Make recipe name unique by appending first unique input if there's a duplicate
-        let uniqueName = name;
-        if (this.recipeNames.has(name)) {
-            // Find the original recipe's inputs
-            const originalRecipeId = this.recipeNames.get(name)!;
-            const originalRecipe = this.recipes.find(r => r.id === originalRecipeId);
-
-            if (originalRecipe) {
-                // Update the original recipe's name to include its distinguishing input
-                const originalInputs = new Set(Object.keys(originalRecipe.in || {}));
-                let originalDistinguishing: string | null = null;
-
-                // Find first input in original that's different from current recipe
-                const currentInputs = new Set(Object.keys(recipeIn));
-                for (const inpId of originalInputs) {
-                    if (!currentInputs.has(inpId)) {
-                        originalDistinguishing = inpId;
-                        break;
-                    }
-                }
-
-                // If all inputs are the same or no difference found, use first input of original
-                if (!originalDistinguishing && originalInputs.size > 0) {
-                    originalDistinguishing = Array.from(originalInputs)[0];
-                }
-
-                if (originalDistinguishing) {
-                    const originalInputName = this.productIdToName.get(originalDistinguishing) || originalDistinguishing;
-                    originalRecipe.name = `${name} (${originalInputName})`;
-                }
-
-                // Now update current recipe's name
-                if (Object.keys(recipeIn).length > 0) {
-                    // Find first input that's different from the original recipe
-                    let distinguishingInput: string | null = null;
-                    for (const inpId of Object.keys(recipeIn)) {
-                        if (!originalInputs.has(inpId)) {
-                            distinguishingInput = inpId;
-                            break;
-                        }
-                    }
-
-                    // If all inputs are the same, use the first input anyway
-                    if (!distinguishingInput && Object.keys(recipeIn).length > 0) {
-                        distinguishingInput = Object.keys(recipeIn)[0];
-                    }
-
-                    if (distinguishingInput) {
-                        const inputName = this.productIdToName.get(distinguishingInput) || distinguishingInput;
-                        uniqueName = `${name} (${inputName})`;
-                    }
-                }
-            }
-        } else {
-            this.recipeNames.set(name, slug);
-        }
-
         // Create recipe entry
         const recipeEntry: RecipeEntry = {
             id: slug,
-            name: uniqueName,
+            name: name,
             category: recipeCategory,
             row: 0,
             time: duration,
@@ -691,30 +633,25 @@ class COIToFactorioLabConverter {
 
         console.log(`Generating sprite sheet from ${this.iconsFolder}...`);
 
-        // Find all icon files
+        // Find all icon files (non-recursive)
         const iconFiles: Map<string, string> = new Map();
         const extensions = ['.png', '.PNG', '.webp', '.WEBP', '.svg', '.SVG'];
 
-        const findIconsRecursive = (dir: string) => {
-            const items = fs.readdirSync(dir);
-            for (const item of items) {
-                const fullPath = path.join(dir, item);
-                const stat = fs.statSync(fullPath);
-                if (stat.isDirectory()) {
-                    findIconsRecursive(fullPath);
-                } else if (extensions.some(ext => item.endsWith(ext))) {
-                    const key = path.parse(item).name.toLowerCase();
-                    iconFiles.set(key, fullPath);
-                }
+        const items = fs.readdirSync(this.iconsFolder);
+        for (const item of items) {
+            const fullPath = path.join(this.iconsFolder, item);
+            const stat = fs.statSync(fullPath);
+            if (!stat.isDirectory() && extensions.some(ext => item.endsWith(ext))) {
+                const key = path.parse(item).name.toLowerCase();
+                iconFiles.set(key, fullPath);
             }
-        };
+        }
 
-        findIconsRecursive(this.iconsFolder);
         console.log(`  Found ${iconFiles.size} icon files`);
 
-        // Calculate sprite sheet dimensions
+        // Calculate sprite sheet dimensions (make it as square as possible)
         const numIcons = this.icons.length;
-        const cols = 16;
+        const cols = Math.ceil(Math.sqrt(numIcons));
         const rows = Math.ceil(numIcons / cols);
 
         const sheetWidth = cols * iconSize;
@@ -882,9 +819,7 @@ class COIToFactorioLabConverter {
 }
 
 function parseArgs(): {
-    products: string;
-    machines: string;
-    transports?: string;
+    data: string;
     icons?: string;
     output: string;
     iconSize: number;
@@ -897,12 +832,8 @@ function parseArgs(): {
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
-        if ((arg === '--products' || arg === '-p') && i + 1 < args.length) {
-            result.products = args[++i];
-        } else if ((arg === '--machines' || arg === '-m') && i + 1 < args.length) {
-            result.machines = args[++i];
-        } else if ((arg === '--transports' || arg === '-t') && i + 1 < args.length) {
-            result.transports = args[++i];
+        if ((arg === '--data' || arg === '-d') && i + 1 < args.length) {
+            result.data = args[++i];
         } else if ((arg === '--icons' || arg === '-i') && i + 1 < args.length) {
             result.icons = args[++i];
         } else if ((arg === '--output' || arg === '-o') && i + 1 < args.length) {
@@ -914,14 +845,13 @@ function parseArgs(): {
 Convert Captain of Industry data to FactorioLab format
 
 Usage:
-  node dist/main.js --products <file> --machines <file> [options]
+  node dist/main.js --data <directory> [options]
 
 Required:
-  --products, -p    Path to products.json from captain-of-data mod
-  --machines, -m    Path to machines_and_buildings.json from captain-of-data mod
+  --data, -d        Path to directory containing captain-of-data JSON files
+                    (products.json, machines_and_buildings.json, transports.json)
 
 Optional:
-  --transports, -t  Path to transports.json from captain-of-data mod
   --icons, -i       Path to folder containing icon images
   --output, -o      Output folder for data.json and icons.webp (default: ./factoriolab_output)
   --icon-size       Icon size in pixels (default: 64)
@@ -931,8 +861,8 @@ Optional:
         }
     }
 
-    if (!result.products || !result.machines) {
-        console.error('Error: --products and --machines are required');
+    if (!result.data) {
+        console.error('Error: --data is required');
         console.error('Use --help for usage information');
         process.exit(1);
     }
@@ -944,9 +874,7 @@ async function main() {
     const args = parseArgs();
 
     const converter = new COIToFactorioLabConverter(
-        args.products,
-        args.machines,
-        args.transports,
+        args.data,
         args.icons
     );
 
