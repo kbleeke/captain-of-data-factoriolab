@@ -12,3 +12,5 @@ wheels/
 data
 factoriolab_output
 old
+
+node_modules
