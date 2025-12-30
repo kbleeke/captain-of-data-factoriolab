@@ -571,6 +571,286 @@ class COIToFactorioLabConverter {
         }
     }
 
+    // Recipe deduplication helpers
+    private getDistinctiveInputsOrOutputs(recipes: RecipeEntry[]): {
+        inputs: string[],
+        outputs: string[]
+    } {
+        const distinctiveInputs: string[] = [];
+        const distinctiveOutputs: string[] = [];
+
+        // Get all unique input and output IDs
+        const allInputIds = new Set<string>();
+        const allOutputIds = new Set<string>();
+        for (const recipe of recipes) {
+            for (const inId of Object.keys(recipe.in)) {
+                allInputIds.add(inId);
+            }
+            for (const outId of Object.keys(recipe.out)) {
+                allOutputIds.add(outId);
+            }
+        }
+
+        // Check which inputs are distinctive (vary across recipes)
+        for (const inputId of allInputIds) {
+            const values = new Set<number>();
+            let presentCount = 0;
+            for (const recipe of recipes) {
+                const value = recipe.in[inputId] || 0;
+                values.add(value);
+                if (value > 0) presentCount++;
+            }
+            // Only distinctive if:
+            // 1. Different quantities across recipes, OR
+            // 2. Present in some but not all recipes
+            if (values.size > 1 && (presentCount < recipes.length || values.has(0))) {
+                distinctiveInputs.push(inputId);
+            }
+        }
+
+        // Check which outputs are distinctive
+        for (const outputId of allOutputIds) {
+            const values = new Set<number>();
+            let presentCount = 0;
+            for (const recipe of recipes) {
+                const value = recipe.out[outputId] || 0;
+                values.add(value);
+                if (value > 0) presentCount++;
+            }
+            // Only distinctive if:
+            // 1. Different quantities across recipes, OR
+            // 2. Present in some but not all recipes
+            if (values.size > 1 && (presentCount < recipes.length || values.has(0))) {
+                distinctiveOutputs.push(outputId);
+            }
+        }
+
+        return { inputs: distinctiveInputs, outputs: distinctiveOutputs };
+    }
+
+    private getDistinctiveString(recipe: RecipeEntry, distinctiveIndices: { inputs: string[], outputs: string[] }): string | null {
+        const parts: string[] = [];
+
+        // Get distinctive input names
+        const distinctiveInputNames = distinctiveIndices.inputs
+            .filter(inputId => recipe.in[inputId])
+            .map(inputId => this.productIdToName.get(inputId) || inputId);
+
+        // Get distinctive output names
+        const distinctiveOutputNames = distinctiveIndices.outputs
+            .filter(outputId => recipe.out[outputId])
+            .map(outputId => this.productIdToName.get(outputId) || outputId);
+
+        if (distinctiveInputNames.length > 0) {
+            parts.push(distinctiveInputNames.join(', '));
+        }
+
+        if (distinctiveOutputNames.length > 0) {
+            parts.push(`→ ${distinctiveOutputNames.join(', ')}`);
+        }
+
+        return parts.length > 0 ? parts.join(' ') : null;
+    }
+
+    private getBuildingTier(producerId: string): string | null {
+        // Find the item for this producer
+        for (const item of this.items) {
+            if (item.id === producerId) {
+                const name = item.name;
+                // Match Roman numerals at the end
+                const tierMatch = name.match(/\s+(II|III|IV|V|VI|VII|VIII|IX|X)$/);
+                if (tierMatch) {
+                    return tierMatch[1];
+                }
+                // Check for tier 2 indicators
+                if (name.includes('(large)') || name.includes('large')) {
+                    return 'II';
+                }
+                // Default tier I
+                return 'I';
+            }
+        }
+        return 'I';
+    }
+
+    private getBuildingFamily(producerId: string): string {
+        // Find the item for this producer
+        for (const item of this.items) {
+            if (item.id === producerId) {
+                return item.name
+                    .replace(/\s+(II|III|IV|V|VI|VII|VIII|IX|X)$/, '')
+                    .replace(/\s+\(large\)$/, '')
+                    .trim();
+            }
+        }
+        return producerId;
+    }
+
+    deduplicateRecipeNames(): void {
+        console.log('Deduplicating recipe names...');
+
+        // Group recipes by name
+        const recipesByName = new Map<string, RecipeEntry[]>();
+        for (const recipe of this.recipes) {
+            if (!recipesByName.has(recipe.name)) {
+                recipesByName.set(recipe.name, []);
+            }
+            recipesByName.get(recipe.name)!.push(recipe);
+        }
+
+        let totalRenamed = 0;
+
+        // Process each group of duplicate names
+        for (const [recipeName, instances] of recipesByName.entries()) {
+            if (instances.length <= 1) continue;
+
+            // Pass 1: Differentiate by inputs/outputs
+            const distinctiveIndices = this.getDistinctiveInputsOrOutputs(instances);
+
+            for (let i = 0; i < instances.length; i++) {
+                const recipe = instances[i];
+                const distinctiveStr = this.getDistinctiveString(recipe, distinctiveIndices);
+
+                if (!distinctiveStr) continue;
+
+                // Check if any other instance has different distinctive inputs/outputs
+                const hasDifferent = instances.some((other, j) => {
+                    if (j === i) return false;
+                    const otherStr = this.getDistinctiveString(other, distinctiveIndices);
+                    return otherStr && otherStr !== distinctiveStr;
+                });
+
+                if (hasDifferent) {
+                    recipe.name = `${recipeName} (${distinctiveStr})`;
+                    totalRenamed++;
+                }
+            }
+
+            // Pass 2: Add building tier if needed
+            const recipesByCurrentName = new Map<string, RecipeEntry[]>();
+            for (const recipe of instances) {
+                if (!recipesByCurrentName.has(recipe.name)) {
+                    recipesByCurrentName.set(recipe.name, []);
+                }
+                recipesByCurrentName.get(recipe.name)!.push(recipe);
+            }
+
+            for (const sameNameInstances of recipesByCurrentName.values()) {
+                if (sameNameInstances.length <= 1) continue;
+
+                // Group by building family
+                const buildingFamilies = new Map<string, RecipeEntry[]>();
+                for (const recipe of sameNameInstances) {
+                    const primaryProducer = recipe.producers[0];
+                    const family = this.getBuildingFamily(primaryProducer);
+                    if (!buildingFamilies.has(family)) {
+                        buildingFamilies.set(family, []);
+                    }
+                    buildingFamilies.get(family)!.push(recipe);
+                }
+
+                // For each building family with multiple tiers
+                for (const familyInstances of buildingFamilies.values()) {
+                    if (familyInstances.length > 1) {
+                        const tiers = new Set(familyInstances.map(r => this.getBuildingTier(r.producers[0])));
+
+                        if (tiers.size > 1) {
+                            for (const recipe of familyInstances) {
+                                const tier = this.getBuildingTier(recipe.producers[0]);
+                                const endsWithRomanNumeral = recipe.name.match(/\s+(I|II|III|IV|V|VI|VII|VIII|IX|X)$/);
+
+                                if (endsWithRomanNumeral) {
+                                    if (endsWithRomanNumeral[1] !== tier) {
+                                        recipe.name = `${recipe.name} (T${tier})`;
+                                        totalRenamed++;
+                                    }
+                                } else {
+                                    recipe.name = `${recipe.name} ${tier}`;
+                                    totalRenamed++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pass 3: Handle building variants
+            const finalRecipesByName = new Map<string, RecipeEntry[]>();
+            for (const recipe of instances) {
+                if (!finalRecipesByName.has(recipe.name)) {
+                    finalRecipesByName.set(recipe.name, []);
+                }
+                finalRecipesByName.get(recipe.name)!.push(recipe);
+            }
+
+            for (const sameNameInstances of finalRecipesByName.values()) {
+                if (sameNameInstances.length <= 1) continue;
+
+                const producerNames = new Set(sameNameInstances.map(r => r.producers[0]));
+
+                if (producerNames.size > 1) {
+                    // Different buildings - add building variant
+                    for (const recipe of sameNameInstances) {
+                        const producerId = recipe.producers[0];
+                        // Find producer name
+                        let producerName = producerId;
+                        for (const item of this.items) {
+                            if (item.id === producerId) {
+                                producerName = item.name;
+                                break;
+                            }
+                        }
+
+                        let buildingKey = producerName
+                            .replace(/\s+(II|III|IV|V|VI|VII|VIII|IX|X)$/, '')
+                            .replace(/\s+\(large\)$/, '');
+
+                        const modifierMatch = buildingKey.match(/\(([^)]+)\)$/);
+                        if (modifierMatch) {
+                            buildingKey = modifierMatch[1];
+                        } else {
+                            buildingKey = buildingKey.replace(/^.*\s+/, '');
+                        }
+
+                        recipe.name = `${recipe.name} [${buildingKey}]`;
+                        totalRenamed++;
+                    }
+                } else {
+                    // Same building - optional inputs/outputs
+                    const additionalIndices = this.getDistinctiveInputsOrOutputs(sameNameInstances);
+                    for (const recipe of sameNameInstances) {
+                        const additionalStr = this.getDistinctiveString(recipe, additionalIndices);
+                        if (additionalStr) {
+                            recipe.name = `${recipe.name} (${additionalStr})`;
+                            totalRenamed++;
+                        }
+                    }
+                }
+            }
+
+            // Pass 4: Use recipe ID as last resort
+            const absoluteFinalCheck = new Map<string, RecipeEntry[]>();
+            for (const recipe of instances) {
+                if (!absoluteFinalCheck.has(recipe.name)) {
+                    absoluteFinalCheck.set(recipe.name, []);
+                }
+                absoluteFinalCheck.get(recipe.name)!.push(recipe);
+            }
+
+            for (const stillDuplicates of absoluteFinalCheck.values()) {
+                if (stillDuplicates.length > 1) {
+                    for (const recipe of stillDuplicates) {
+                        const idSuffix = recipe.id.replace(/^.*-/, '').slice(-10);
+                        recipe.name = `${recipe.name} [${idSuffix}]`;
+                        totalRenamed++;
+                    }
+                }
+            }
+        }
+
+        console.log(`  Renamed ${totalRenamed} recipes to avoid duplicates`);
+    }
+
     async calculateAverageColorFromBuffer(imageBuffer: Buffer): Promise<string> {
         if (!HAS_SHARP) {
             return '#808080';
@@ -812,6 +1092,7 @@ class COIToFactorioLabConverter {
         this.convertProductsToItems();
         this.convertMachines();
         this.convertTransports();
+        this.deduplicateRecipeNames();
         this.buildCategories();
         await this.generateOutput(outputFolder);
         console.log('\nConversion complete!');
